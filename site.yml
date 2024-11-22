@@ -1,0 +1,208 @@
+---
+# site.yml
+- name: Deploy ELK Stack with Docker Compose on AWS
+  hosts: elk_servers
+  become: true
+  vars:
+    elk_version: "8.12.0"
+    elastic_password: "changeme123"
+    kibana_password: "changeme123"
+    es_heap_size: "1g"
+
+  tasks:
+    - name: Create ELK stack directory
+      file:
+        path: /opt/elk-stack
+        state: directory
+        mode: '0755'
+        owner: ubuntu
+        group: ubuntu
+
+    - name: Create docker-compose.yml
+      copy:
+        dest: /opt/elk-stack/docker-compose.yml
+        content: |
+          version: '3.8'
+          services:
+            elasticsearch:
+              image: "docker.elastic.co/elasticsearch/elasticsearch:8.12.0"
+              container_name: elasticsearch
+              environment:
+                - discovery.type=single-node
+                - ES_JAVA_OPTS=-Xms1g -Xmx1g
+                - ELASTIC_PASSWORD=changeme123
+                - xpack.security.enabled=true
+                - network.host=0.0.0.0
+              ulimits:
+                memlock:
+                  soft: -1
+                  hard: -1
+                nofile:
+                  soft: 65536
+                  hard: 65536
+              volumes:
+                - elasticsearch-data:/usr/share/elasticsearch/data
+              ports:
+                - "9200:9200"
+              networks:
+                - elk-network
+              restart: unless-stopped
+
+            logstash:
+              image: "docker.elastic.co/logstash/logstash:8.12.0"
+              container_name: logstash
+              environment:
+                - ELASTICSEARCH_HOST=elasticsearch
+                - ELASTICSEARCH_PORT=9200
+                - ELASTIC_PASSWORD=changeme123
+              volumes:
+                - ./logstash/pipeline:/usr/share/logstash/pipeline
+              ports:
+                - "5044:5044"
+                - "5000:5000/tcp"
+                - "5000:5000/udp"
+                - "9600:9600"
+              networks:
+                - elk-network
+              depends_on:
+                - elasticsearch
+              restart: unless-stopped
+
+            kibana:
+              image: "docker.elastic.co/kibana/kibana:8.12.0"
+              container_name: kibana
+              environment:
+                - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+                - ELASTICSEARCH_USERNAME=kibana_system
+                - ELASTICSEARCH_PASSWORD=changeme123
+                - SERVER_HOST=0.0.0.0
+              ports:
+                - "5601:5601"
+              networks:
+                - elk-network
+              depends_on:
+                - elasticsearch
+              restart: unless-stopped
+
+          networks:
+            elk-network:
+              driver: bridge
+
+          volumes:
+            elasticsearch-data:
+              driver: local
+        mode: '0644'
+        owner: ubuntu
+        group: ubuntu
+
+    - name: Create Logstash pipeline directory
+      file:
+        path: /opt/elk-stack/logstash/pipeline
+        state: directory
+        mode: '0755'
+        owner: ubuntu
+        group: ubuntu
+
+    - name: Create Logstash pipeline configuration
+      copy:
+        dest: /opt/elk-stack/logstash/pipeline/logstash.conf
+        content: |
+          input {
+            beats {
+              port => 5044
+            }
+            tcp {
+              port => 5000
+            }
+          }
+
+          output {
+            elasticsearch {
+              hosts => ["elasticsearch:9200"]
+              user => "elastic"
+              password => "changeme123"
+              index => "%{[@metadata][beat]}-%{[@metadata][version]}-%{+YYYY.MM.dd}"
+            }
+          }
+        owner: ubuntu
+        group: ubuntu
+
+    - name: Configure sysctl for Elasticsearch
+      sysctl:
+        name: vm.max_map_count
+        value: '262144'
+        state: present
+        reload: yes
+
+    - name: Install Docker dependencies
+      apt:
+        name: 
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+          - python3-pip
+        state: present
+        update_cache: yes
+
+    - name: Add Docker GPG apt Key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker Repository
+      apt_repository:
+        repo: deb https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+        state: present
+
+    - name: Install Docker
+      apt:
+        name: docker-ce
+        state: present
+        update_cache: yes
+
+    - name: Install Docker Compose
+      apt:
+        name: docker-compose
+        state: present
+
+    - name: Install Python Docker module
+      pip:
+        name: docker
+        state: present
+
+    - name: Ensure Docker service is running
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Pull required Docker images
+      docker_image:
+        name: "{{ item }}"
+        source: pull
+      loop:
+        - "docker.elastic.co/elasticsearch/elasticsearch:8.12.0"
+        - "docker.elastic.co/logstash/logstash:8.12.0"
+        - "docker.elastic.co/kibana/kibana:8.12.0"
+
+    - name: Start ELK stack
+      community.docker.docker_compose:
+        project_src: /opt/elk-stack
+        files:
+          - docker-compose.yml
+        state: present
+
+    - name: Wait for Elasticsearch to be ready
+      uri:
+        url: "http://localhost:9200"
+        method: GET
+        user: elastic
+        password: changeme123
+        force_basic_auth: yes
+        status_code: 200
+        validate_certs: no
+      register: result
+      until: result.status == 200
+      retries: 60
+      delay: 5
