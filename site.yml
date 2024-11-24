@@ -1,5 +1,5 @@
 ---
-- hosts: elk
+- hosts: elk_servers
   become: yes
   roles:
     - elk-setup
