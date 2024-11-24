@@ -2,6 +2,8 @@
 - name: Deploy ELK Stack with Docker Compose on AWS
   hosts: elk_servers
   become: true
+  roles:
+    - elk-setup
   vars:
     elk_version: "8.13.2"
     elastic_password: "Secure123Change"
